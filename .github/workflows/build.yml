@@ -1,0 +1,87 @@
+# trying to use github to compile the kext because i do NOT have a mac
+# uhhhhh hope this works
+
+name: Build VoodooPS2Controller
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # mackernelsdk for attempt 2
+      - uses: actions/checkout@v4
+        with:
+          repository: acidanthera/MacKernelSDK
+          path: MacKernelSDK
+
+      - name: Environment info
+        run: |
+          mkdir -p logs Build/Products
+          { sw_vers; xcodebuild -version; ls -la; } 2>&1 | tee logs/env.log
+          xcodebuild -list -project VoodooPS2Controller.xcodeproj 2>&1 | tee -a logs/env.log || true
+
+      # attempt 1: current sdk
+      - name: Build (attempt 1, plain)
+        id: attempt1
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcodebuild -project VoodooPS2Controller.xcodeproj -alltargets \
+            -configuration Release \
+            SYMROOT="$PWD/Build/Products" \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=10.9 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee logs/attempt1.log
+
+      # attempt 2: mackernelsdk
+      - name: Build (attempt 2, MacKernelSDK)
+        if: steps.attempt1.outcome == 'failure'
+        id: attempt2
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          SDK="$PWD/MacKernelSDK"
+          xcodebuild -project VoodooPS2Controller.xcodeproj -alltargets \
+            -configuration Release \
+            SYMROOT="$PWD/Build/Products" \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=10.9 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            HEADER_SEARCH_PATHS="$SDK/Headers" \
+            SYSTEM_HEADER_SEARCH_PATHS="$SDK/Headers" \
+            LIBRARY_SEARCH_PATHS="$SDK/Library/x86_64" \
+            2>&1 | tee logs/attempt2.log
+
+      - name: Inspect result
+        if: always()
+        run: |
+          echo "== kexts found ==" | tee logs/result.log
+          find Build -name "*.kext" -maxdepth 6 2>&1 | tee -a logs/result.log
+          echo "== binaries ==" | tee -a logs/result.log
+          find Build -path "*Contents/MacOS/*" -type f 2>/dev/null | while read -r f; do
+            echo "$f"; file "$f"
+          done 2>&1 | tee -a logs/result.log
+
+      - name: Package
+        if: always()
+        run: |
+          if [ -d Build/Products/Release ]; then
+            ditto -c -k --sequesterRsrc --keepParent Build/Products/Release VoodooPS2-built.zip
+          else
+            echo "No Release folder was produced; see logs." > NO-BUILD.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voodoops2-result
+          path: |
+            VoodooPS2-built.zip
+            NO-BUILD.txt
+            logs/
+          if-no-files-found: warn
