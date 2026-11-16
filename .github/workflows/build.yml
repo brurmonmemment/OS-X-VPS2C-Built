@@ -1,5 +1,4 @@
-# trying to use github to compile the kext because i do NOT have a mac
-# uhhhhh hope this works
+# thanks claude
 
 name: Build VoodooPS2Controller
 
@@ -12,50 +11,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # mackernelsdk for attempt 2
       - uses: actions/checkout@v4
         with:
           repository: acidanthera/MacKernelSDK
           path: MacKernelSDK
 
-      - name: Environment info
+      - name: Install the old MacOSX10.8 SDK
         run: |
           mkdir -p logs Build/Products
-          { sw_vers; xcodebuild -version; ls -la; } 2>&1 | tee logs/env.log
-          xcodebuild -list -project VoodooPS2Controller.xcodeproj 2>&1 | tee -a logs/env.log || true
+          DEV="$(xcode-select -p)"
+          SDKDIR="$DEV/Platforms/MacOSX.platform/Developer/SDKs"
+          # The exact release tag for this file is unverified, so try a few known tags.
+          for tag in 10.13 MacOSX10.11.sdk 11.3; do
+            url="https://github.com/phracker/MacOSX-SDKs/releases/download/$tag/MacOSX10.8.sdk.tar.xz"
+            echo "Trying $url" | tee -a logs/sdk.log
+            if curl -fL -o /tmp/MacOSX10.8.sdk.tar.xz "$url" 2>>logs/sdk.log; then
+              echo "Downloaded from tag $tag" | tee -a logs/sdk.log
+              break
+            fi
+          done
+          test -s /tmp/MacOSX10.8.sdk.tar.xz
+          sudo tar -xf /tmp/MacOSX10.8.sdk.tar.xz -C "$SDKDIR"
+          # Modern Xcode refuses SDKs older than this value; lower it so 10.8 is allowed.
+          sudo plutil -replace MinimumSDKVersion -string 10.8 "$DEV/Platforms/MacOSX.platform/Info.plist"
+          ls "$SDKDIR" | tee -a logs/sdk.log
+          { sw_vers; xcodebuild -version; xcodebuild -showsdks; } 2>&1 | tee logs/env.log
 
-      # attempt 1: current sdk
-      - name: Build (attempt 1, plain)
+      - name: Build (attempt 1, "All Kext" scheme, 10.8 SDK)
         id: attempt1
         continue-on-error: true
         run: |
           set -o pipefail
-          xcodebuild -project VoodooPS2Controller.xcodeproj -alltargets \
+          xcodebuild -project VoodooPS2Controller.xcodeproj -scheme "All Kext" \
             -configuration Release \
             SYMROOT="$PWD/Build/Products" \
             ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
-            MACOSX_DEPLOYMENT_TARGET=10.9 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee logs/attempt1.log
 
-      # attempt 2: mackernelsdk
-      - name: Build (attempt 2, MacKernelSDK)
+      - name: Build (attempt 2, all targets, 10.8 SDK)
         if: steps.attempt1.outcome == 'failure'
         id: attempt2
         continue-on-error: true
         run: |
           set -o pipefail
-          SDK="$PWD/MacKernelSDK"
           xcodebuild -project VoodooPS2Controller.xcodeproj -alltargets \
             -configuration Release \
             SYMROOT="$PWD/Build/Products" \
             ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
-            MACOSX_DEPLOYMENT_TARGET=10.9 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee logs/attempt2.log
+
+      - name: Build (attempt 3, modern SDK + MacKernelSDK, 10.6 target)
+        if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+        id: attempt3
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          SDK="$PWD/MacKernelSDK"
+          xcodebuild -project VoodooPS2Controller.xcodeproj -scheme "All Kext" \
+            -configuration Release \
+            SYMROOT="$PWD/Build/Products" \
+            SDKROOT=macosx \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=10.6 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             HEADER_SEARCH_PATHS="$SDK/Headers" \
             SYSTEM_HEADER_SEARCH_PATHS="$SDK/Headers" \
             LIBRARY_SEARCH_PATHS="$SDK/Library/x86_64" \
-            2>&1 | tee logs/attempt2.log
+            2>&1 | tee logs/attempt3.log
 
       - name: Inspect result
         if: always()
@@ -85,3 +109,9 @@ jobs:
             NO-BUILD.txt
             logs/
           if-no-files-found: warn
+
+      # red if no kext came out
+      - name: Fail if no kext was built
+        if: always()
+        run: |
+          test -n "$(find Build -name '*.kext' -maxdepth 6 | head -1)"
